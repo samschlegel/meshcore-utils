@@ -3419,6 +3419,7 @@ kernel void vanity_search(
     constant unsigned int& prefix_count [[buffer(2)]],
     constant uint64_t& base_nonce [[buffer(3)]],
     constant uint64_t& iters_per_thread [[buffer(4)]],
+    constant u8 *seed_salt [[buffer(5)]],
     uint tid [[thread_position_in_grid]])
 {
     for (uint64_t iter = 0; iter < iters_per_thread; iter++) {
@@ -3427,8 +3428,8 @@ kernel void vanity_search(
             return;
         uint64_t idx = base_nonce + (uint64_t)tid * iters_per_thread + iter;
         u8 seed[32];
-        for (int i = 0; i < 32; i++) seed[i] = 0;
         for (int i = 0; i < 8; i++) seed[i] = (u8)(idx >> (i * 8));
+        for (int i = 8; i < 32; i++) seed[i] = seed_salt[i - 8];
         u8 hash[64];
         sha512_32(hash, seed);
         u8 scalar[32];

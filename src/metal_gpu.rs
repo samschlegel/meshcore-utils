@@ -5,6 +5,8 @@ use metal::{
     Buffer, CommandQueue, CompileOptions, ComputePipelineState, Device, MTLResourceOptions,
     MTLSize,
 };
+use rand::rngs::OsRng;
+use rand::RngCore;
 
 use crate::search::PrefixMatcher;
 use crate::types::MeshCoreKeypair;
@@ -23,6 +25,7 @@ pub struct MetalSearcher {
     pipeline: ComputePipelineState,
     result_buf: Buffer,
     prefix_buf: Buffer,
+    salt_buf: Buffer,
     prefix_count: u32,
     grid_size: u64,
     threadgroup_size: u64,
@@ -97,12 +100,14 @@ impl MetalSearcher {
             prefix_data.len() as u64,
             MTLResourceOptions::StorageModeShared,
         );
+        let salt_buf = device.new_buffer(24, MTLResourceOptions::StorageModeShared);
 
         Ok(MetalSearcher {
             queue,
             pipeline,
             result_buf,
             prefix_buf,
+            salt_buf,
             prefix_count,
             grid_size,
             threadgroup_size,
@@ -115,6 +120,13 @@ impl MetalSearcher {
         // Zero the result buffer
         unsafe {
             std::ptr::write_bytes(self.result_buf.contents() as *mut u8, 0, 100);
+        }
+
+        // Generate fresh 24-byte random salt for seed entropy (bytes 8-31)
+        unsafe {
+            let salt_ptr = self.salt_buf.contents() as *mut u8;
+            let salt_slice = std::slice::from_raw_parts_mut(salt_ptr, 24);
+            OsRng.fill_bytes(salt_slice);
         }
 
         let cmd_buf = self.queue.new_command_buffer();
@@ -137,6 +149,7 @@ impl MetalSearcher {
             std::mem::size_of::<u64>() as u64,
             &ITERS_PER_THREAD as *const u64 as *const c_void,
         );
+        encoder.set_buffer(5, Some(&self.salt_buf), 0);
 
         let grid = MTLSize::new(self.grid_size, 1, 1);
         let threadgroup = MTLSize::new(self.threadgroup_size, 1, 1);
