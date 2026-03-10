@@ -1,6 +1,8 @@
 mod keygen;
 #[cfg(feature = "cuda")]
 mod gpu;
+#[cfg(feature = "metal")]
+mod metal_gpu;
 mod search;
 mod types;
 
