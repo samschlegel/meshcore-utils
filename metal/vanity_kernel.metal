@@ -23,7 +23,7 @@ using namespace metal;
 
 
 
-static uint64_t load_3(const unsigned char *inp) {
+static uint64_t load_3(thread const unsigned char *inp) {
     uint64_t result;
 
     result = (uint64_t) inp[0];
@@ -33,7 +33,7 @@ static uint64_t load_3(const unsigned char *inp) {
     return result;
 }
 
-static uint64_t load_4(const unsigned char *inp) {
+static uint64_t load_4(thread const unsigned char *inp) {
     uint64_t result;
 
     result = (uint64_t) inp[0];
@@ -53,7 +53,7 @@ typedef int32_t fe[10];
 void fe_mul(fe h, const fe f, const fe g);
 void fe_sq(fe h, const fe f);
 void fe_sq2(fe h, const fe f);
-void fe_tobytes(unsigned char *s, const fe h);
+void fe_tobytes(thread unsigned char *s, const fe h);
 void fe_pow22523(fe out, const fe z);
 
 // Field element arithmetic (from solana-perf-libs ref10)
@@ -243,6 +243,7 @@ void  fe_cmov(fe f, const fe g, unsigned int b) {
 /*
     Replace (f,g) with (g,f) if b == 1;
     replace (f,g) with (f,g) if b == 0.
+*/
 
 /*
     h = f
@@ -278,7 +279,7 @@ void  fe_copy(fe h, const fe f) {
     Ignores top bit of h.
 */
 
-void  fe_frombytes(fe h, const unsigned char *s) {
+void  fe_frombytes(fe h, thread const unsigned char *s) {
     int64_t h0 = load_4(s);
     int64_t h1 = load_3(s + 4) << 6;
     int64_t h2 = load_3(s + 7) << 5;
@@ -1310,7 +1311,7 @@ Proof:
   so floor(2^(-255)(h + 19 2^(-25) h9 + 2^(-1))) = q.
 */
 
-void  fe_tobytes(unsigned char *s, const fe h) {
+void  fe_tobytes(thread unsigned char *s, const fe h) {
     int32_t h0 = h[0];
     int32_t h1 = h[1];
     int32_t h2 = h[2];
@@ -1428,26 +1429,26 @@ typedef struct { fe YplusX; fe YminusX; fe Z; fe T2d; } ge_cached;
  void fe_sq(fe h, const fe f);
  void fe_sq2(fe h, const fe f);
  void fe_mul(fe h, const fe f, const fe g);
- void fe_tobytes(unsigned char *s, const fe h);
+ void fe_tobytes(thread unsigned char *s, const fe h);
  void fe_pow22523(fe out, const fe z);
- void ge_p2_0(ge_p2 *h);
- void ge_p2_dbl(ge_p1p1 *r, const ge_p2 *p);
- void ge_p3_0(ge_p3 *h);
- void ge_p3_dbl(ge_p1p1 *r, const ge_p3 *p);
- void ge_p3_to_cached(ge_cached *r, const ge_p3 *p);
- void ge_p3_to_p2(ge_p2 *r, const ge_p3 *p);
- void ge_p3_tobytes(unsigned char *s, const ge_p3 *h);
- void ge_p1p1_to_p2(ge_p2 *r, const ge_p1p1 *p);
- void ge_p1p1_to_p3(ge_p3 *r, const ge_p1p1 *p);
- void ge_add(ge_p1p1 *r, const ge_p3 *p, const ge_cached *q);
- void ge_sub(ge_p1p1 *r, const ge_p3 *p, const ge_cached *q);
- void ge_addsub(ge_p1p1 *r, const ge_p3 *p, const ge_cached *q, bool add);
- void ge_madd(ge_p1p1 *r, const ge_p3 *p, const ge_precomp *q);
- void ge_msub(ge_p1p1 *r, const ge_p3 *p, const ge_precomp *q);
- void ge_maddsub(ge_p1p1 *r, const ge_p3 *p, const ge_precomp *q, bool add);
- void ge_scalarmult_base(ge_p3 *h, const unsigned char *a);
- int  ge_frombytes_negate_vartime(ge_p3 *h, const unsigned char *s);
- void ge_tobytes(unsigned char *s, const ge_p2 *h);
+ void ge_p2_0(thread ge_p2 *h);
+ void ge_p2_dbl(thread ge_p1p1 *r, thread const ge_p2 *p);
+ void ge_p3_0(thread ge_p3 *h);
+ void ge_p3_dbl(thread ge_p1p1 *r, thread const ge_p3 *p);
+ void ge_p3_to_cached(thread ge_cached *r, thread const ge_p3 *p);
+ void ge_p3_to_p2(thread ge_p2 *r, thread const ge_p3 *p);
+ void ge_p3_tobytes(thread unsigned char *s, thread const ge_p3 *h);
+ void ge_p1p1_to_p2(thread ge_p2 *r, thread const ge_p1p1 *p);
+ void ge_p1p1_to_p3(thread ge_p3 *r, thread const ge_p1p1 *p);
+ void ge_add(thread ge_p1p1 *r, thread const ge_p3 *p, thread const ge_cached *q);
+ void ge_sub(thread ge_p1p1 *r, thread const ge_p3 *p, thread const ge_cached *q);
+ void ge_addsub(thread ge_p1p1 *r, thread const ge_p3 *p, thread const ge_cached *q, bool add);
+ void ge_madd(thread ge_p1p1 *r, thread const ge_p3 *p, thread const ge_precomp *q);
+ void ge_msub(thread ge_p1p1 *r, thread const ge_p3 *p, thread const ge_precomp *q);
+ void ge_maddsub(thread ge_p1p1 *r, thread const ge_p3 *p, thread const ge_precomp *q, bool add);
+ void ge_scalarmult_base(thread ge_p3 *h, thread const unsigned char *a);
+ int  ge_frombytes_negate_vartime(thread ge_p3 *h, thread const unsigned char *s);
+ void ge_tobytes(thread unsigned char *s, thread const ge_p2 *h);
 
 constant ge_precomp Bi[8] = {
     {
@@ -2847,7 +2848,7 @@ constant ge_precomp base[32][8] = {
 r = p + q
 */
 
-void  ge_add(ge_p1p1 *r, const ge_p3 *p, const ge_cached *q) {
+void  ge_add(thread ge_p1p1 *r, thread const ge_p3 *p, thread const ge_cached *q) {
     fe t0;
     fe_add(r->X, p->Y, p->X);
     fe_sub(r->Y, p->Y, p->X);
@@ -2871,7 +2872,7 @@ constant fe sqrtm1 = {
     -32595792, -7943725, 9377950, 3500415, 12389472, -272473, -25146209, -2005654, 326686, 11406482
 };
 
-int  ge_frombytes_negate_vartime(ge_p3 *h, const unsigned char *s) {
+int  ge_frombytes_negate_vartime(thread ge_p3 *h, thread const unsigned char *s) {
     fe u;
     fe v;
     fe v3;
@@ -2914,13 +2915,13 @@ int  ge_frombytes_negate_vartime(ge_p3 *h, const unsigned char *s) {
 }
 
 
-void  ge_maddsub(ge_p1p1 *r, const ge_p3 *p, const ge_precomp *q, bool add) {
+void  ge_maddsub(thread ge_p1p1 *r, thread const ge_p3 *p, thread const ge_precomp *q, bool add) {
     fe t0;
 
     fe_add(r->X, p->Y, p->X);
     fe_sub(r->Y, p->Y, p->X);
 
-    const int32_t* arg = add ? q->yplusx : q->yminusx;
+    thread const int32_t* arg = add ? q->yplusx : q->yminusx;
     fe_mul(r->Z, r->X, arg);
 
     arg = add ? q->yminusx : q->yplusx;
@@ -2943,7 +2944,7 @@ void  ge_maddsub(ge_p1p1 *r, const ge_p3 *p, const ge_precomp *q, bool add) {
 r = p + q
 */
 
-void  ge_madd(ge_p1p1 *r, const ge_p3 *p, const ge_precomp *q) {
+void  ge_madd(thread ge_p1p1 *r, thread const ge_p3 *p, thread const ge_precomp *q) {
     fe t0;
     fe_add(r->X, p->Y, p->X);
     fe_sub(r->Y, p->Y, p->X);
@@ -2962,7 +2963,7 @@ void  ge_madd(ge_p1p1 *r, const ge_p3 *p, const ge_precomp *q) {
 r = p - q
 */
 
-void  ge_msub(ge_p1p1 *r, const ge_p3 *p, const ge_precomp *q) {
+void  ge_msub(thread ge_p1p1 *r, thread const ge_p3 *p, thread const ge_precomp *q) {
     fe t0;
 
     fe_add(r->X, p->Y, p->X);
@@ -2982,7 +2983,7 @@ void  ge_msub(ge_p1p1 *r, const ge_p3 *p, const ge_precomp *q) {
 r = p
 */
 
-void  ge_p1p1_to_p2(ge_p2 *r, const ge_p1p1 *p) {
+void  ge_p1p1_to_p2(thread ge_p2 *r, thread const ge_p1p1 *p) {
     fe_mul(r->X, p->X, p->T);
     fe_mul(r->Y, p->Y, p->Z);
     fe_mul(r->Z, p->Z, p->T);
@@ -2994,7 +2995,7 @@ void  ge_p1p1_to_p2(ge_p2 *r, const ge_p1p1 *p) {
 r = p
 */
 
-void  ge_p1p1_to_p3(ge_p3 *r, const ge_p1p1 *p) {
+void  ge_p1p1_to_p3(thread ge_p3 *r, thread const ge_p1p1 *p) {
     fe_mul(r->X, p->X, p->T);
     fe_mul(r->Y, p->Y, p->Z);
     fe_mul(r->Z, p->Z, p->T);
@@ -3002,7 +3003,7 @@ void  ge_p1p1_to_p3(ge_p3 *r, const ge_p1p1 *p) {
 }
 
 
-void  ge_p2_0(ge_p2 *h) {
+void  ge_p2_0(thread ge_p2 *h) {
     fe_0(h->X);
     fe_1(h->Y);
     fe_1(h->Z);
@@ -3014,7 +3015,7 @@ void  ge_p2_0(ge_p2 *h) {
 r = 2 * p
 */
 
-void  ge_p2_dbl(ge_p1p1 *r, const ge_p2 *p) {
+void  ge_p2_dbl(thread ge_p1p1 *r, thread const ge_p2 *p) {
     fe t0;
 
     fe_sq(r->X, p->X);
@@ -3029,7 +3030,7 @@ void  ge_p2_dbl(ge_p1p1 *r, const ge_p2 *p) {
 }
 
 
-void  ge_p3_0(ge_p3 *h) {
+void  ge_p3_0(thread ge_p3 *h) {
     fe_0(h->X);
     fe_1(h->Y);
     fe_1(h->Z);
@@ -3041,7 +3042,7 @@ void  ge_p3_0(ge_p3 *h) {
 r = 2 * p
 */
 
-void  ge_p3_dbl(ge_p1p1 *r, const ge_p3 *p) {
+void  ge_p3_dbl(thread ge_p1p1 *r, thread const ge_p3 *p) {
     ge_p2 q;
     ge_p3_to_p2(&q, p);
     ge_p2_dbl(r, &q);
@@ -3057,7 +3058,7 @@ constant fe d2 = {
     -21827239, -5839606, -30745221, 13898782, 229458, 15978800, -12551817, -6495438, 29715968, 9444199
 };
 
-void  ge_p3_to_cached(ge_cached *r, const ge_p3 *p) {
+void  ge_p3_to_cached(thread ge_cached *r, thread const ge_p3 *p) {
     fe_add(r->YplusX, p->Y, p->X);
     fe_sub(r->YminusX, p->Y, p->X);
     fe_copy(r->Z, p->Z);
@@ -3069,14 +3070,14 @@ void  ge_p3_to_cached(ge_cached *r, const ge_p3 *p) {
 r = p
 */
 
- void ge_p3_to_p2(ge_p2 *r, const ge_p3 *p) {
+ void ge_p3_to_p2(thread ge_p2 *r, thread const ge_p3 *p) {
     fe_copy(r->X, p->X);
     fe_copy(r->Y, p->Y);
     fe_copy(r->Z, p->Z);
 }
 
 
- void ge_p3_tobytes(unsigned char *s, const ge_p3 *h) {
+ void ge_p3_tobytes(thread unsigned char *s, thread const ge_p3 *h) {
     fe recip;
     fe x;
     fe y;
@@ -3104,20 +3105,20 @@ static unsigned char  negative(signed char b) {
     return (unsigned char) x;
 }
 
-static void cmov(ge_precomp *t, const ge_precomp *u, unsigned char b) {
+static void cmov(thread ge_precomp *t, thread const ge_precomp *u, unsigned char b) {
     fe_cmov(t->yplusx, u->yplusx, b);
     fe_cmov(t->yminusx, u->yminusx, b);
     fe_cmov(t->xy2d, u->xy2d, b);
 }
 
 // Copy a ge_precomp from constant address space to thread-local
-static void ge_precomp_copy_from_constant(ge_precomp *dst, constant const ge_precomp *src) {
+static void ge_precomp_copy_from_constant(thread ge_precomp *dst, constant const ge_precomp *src) {
     for (int i = 0; i < 10; i++) dst->yplusx[i] = src->yplusx[i];
     for (int i = 0; i < 10; i++) dst->yminusx[i] = src->yminusx[i];
     for (int i = 0; i < 10; i++) dst->xy2d[i] = src->xy2d[i];
 }
 
-static void select_base(ge_precomp *t, int pos, signed char b) {
+static void select_base(thread ge_precomp *t, int pos, signed char b) {
     ge_precomp minust;
     ge_precomp tmp;
     unsigned char bnegative = negative(b);
@@ -3149,7 +3150,7 @@ Preconditions:
   a[31] <= 127
 */
 
-void  ge_scalarmult_base(ge_p3 *h, const unsigned char *a) {
+void  ge_scalarmult_base(thread ge_p3 *h, thread const unsigned char *a) {
     signed char e[64];
     signed char carry;
     ge_p1p1 r;
@@ -3204,7 +3205,7 @@ void  ge_scalarmult_base(ge_p3 *h, const unsigned char *a) {
 r = p - q
 */
 
-void  ge_sub(ge_p1p1 *r, const ge_p3 *p, const ge_cached *q) {
+void  ge_sub(thread ge_p1p1 *r, thread const ge_p3 *p, thread const ge_cached *q) {
     fe t0;
     
     fe_add(r->X, p->Y, p->X);
@@ -3220,13 +3221,13 @@ void  ge_sub(ge_p1p1 *r, const ge_p3 *p, const ge_cached *q) {
     fe_add(r->T, t0, r->T);
 }
 
-void  ge_addsub(ge_p1p1 *r, const ge_p3 *p, const ge_cached *q, bool add) {
+void  ge_addsub(thread ge_p1p1 *r, thread const ge_p3 *p, thread const ge_cached *q, bool add) {
     fe t0;
 
     fe_add(r->X, p->Y, p->X);
     fe_sub(r->Y, p->Y, p->X);
 
-    const int32_t* arg = add ? q->YplusX : q->YminusX;
+    thread const int32_t* arg = add ? q->YplusX : q->YminusX;
     fe_mul(r->Z, r->X, arg);
 
     arg = add ? q->YminusX : q->YplusX;
@@ -3250,7 +3251,7 @@ void  ge_addsub(ge_p1p1 *r, const ge_p3 *p, const ge_cached *q, bool add) {
 
 
 
-void  ge_tobytes(unsigned char *s, const ge_p2 *h) {
+void  ge_tobytes(thread unsigned char *s, thread const ge_p2 *h) {
     fe recip;
     fe x;
     fe y;
@@ -3265,7 +3266,7 @@ void  ge_tobytes(unsigned char *s, const ge_p2 *h) {
 // SHA-512 (single block, 32-byte input)
 // ============================================================================
 
-typedef unsigned long long u64;
+typedef uint64_t u64;
 typedef unsigned int       u32_t;
 typedef unsigned char      u8;
 
@@ -3307,16 +3308,16 @@ inline u64 Sha_Sigma1(u64 x) { return rotr64(x, 14) ^ rotr64(x, 18) ^ rotr64(x, 
 inline u64 sha_sigma0(u64 x) { return rotr64(x, 1) ^ rotr64(x, 8) ^ (x >> 7); }
 inline u64 sha_sigma1(u64 x) { return rotr64(x, 19) ^ rotr64(x, 61) ^ (x >> 6); }
 
-inline u64 load_be64(const u8 *p) {
+inline u64 load_be64(thread const u8 *p) {
     return ((u64)p[0]<<56)|((u64)p[1]<<48)|((u64)p[2]<<40)|((u64)p[3]<<32)|
            ((u64)p[4]<<24)|((u64)p[5]<<16)|((u64)p[6]<<8)|((u64)p[7]);
 }
-inline void store_be64(u8 *p, u64 v) {
+inline void store_be64(thread u8 *p, u64 v) {
     p[0]=(u8)(v>>56);p[1]=(u8)(v>>48);p[2]=(u8)(v>>40);p[3]=(u8)(v>>32);
     p[4]=(u8)(v>>24);p[5]=(u8)(v>>16);p[6]=(u8)(v>>8);p[7]=(u8)v;
 }
 
- void sha512_32(u8 *out, const u8 *msg) {
+ void sha512_32(thread u8 *out, thread const u8 *msg) {
     u64 W[80];
     W[0]=load_be64(msg); W[1]=load_be64(msg+8);
     W[2]=load_be64(msg+16); W[3]=load_be64(msg+24);
@@ -3416,15 +3417,15 @@ kernel void vanity_search(
     device u8 *result [[buffer(0)]],
     constant u8 *prefix_data [[buffer(1)]],
     constant unsigned int& prefix_count [[buffer(2)]],
-    constant unsigned long long& base_nonce [[buffer(3)]],
-    constant unsigned long long& iters_per_thread [[buffer(4)]],
+    constant uint64_t& base_nonce [[buffer(3)]],
+    constant uint64_t& iters_per_thread [[buffer(4)]],
     uint tid [[thread_position_in_grid]])
 {
-    for (unsigned long long iter = 0; iter < iters_per_thread; iter++) {
+    for (uint64_t iter = 0; iter < iters_per_thread; iter++) {
         // Early exit: atomic load instead of volatile cast
         if (atomic_load_explicit((device atomic_uint*)result, memory_order_relaxed) != 0)
             return;
-        unsigned long long idx = base_nonce + (unsigned long long)tid * iters_per_thread + iter;
+        uint64_t idx = base_nonce + (uint64_t)tid * iters_per_thread + iter;
         u8 seed[32];
         for (int i = 0; i < 32; i++) seed[i] = 0;
         for (int i = 0; i < 8; i++) seed[i] = (u8)(idx >> (i * 8));

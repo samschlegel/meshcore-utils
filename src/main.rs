@@ -37,13 +37,13 @@ struct Cli {
     #[arg(long)]
     json: bool,
 
-    /// Use GPU (CUDA) for key search
-    #[cfg(feature = "cuda")]
+    /// Use GPU acceleration
+    #[cfg(any(feature = "cuda", feature = "metal"))]
     #[arg(long)]
     gpu: bool,
 
     /// Verify GPU keygen matches CPU (run 64 test seeds and compare)
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "metal"))]
     #[arg(long)]
     verify: bool,
 }
@@ -357,15 +357,19 @@ fn main() {
         format!(", {} prefixes", prefixes.len())
     };
 
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "metal"))]
     let use_gpu = cli.gpu;
-    #[cfg(not(feature = "cuda"))]
+    #[cfg(not(any(feature = "cuda", feature = "metal")))]
     let use_gpu = false;
 
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "metal"))]
     if cli.verify {
-        eprint!("Compiling CUDA kernel and running verification... ");
-        match gpu::verify_gpu_keygen() {
+        eprint!("Compiling GPU kernel and running verification... ");
+        #[cfg(feature = "cuda")]
+        let result = gpu::verify_gpu_keygen().map_err(|e| format!("{}", e));
+        #[cfg(all(feature = "metal", not(feature = "cuda")))]
+        let result = metal_gpu::verify_gpu_keygen().map_err(|e| format!("{}", e));
+        match result {
             Ok(()) => {
                 eprintln!("PASSED");
                 std::process::exit(0);
