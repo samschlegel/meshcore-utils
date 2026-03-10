@@ -20,3 +20,17 @@ jobs:
       run: cargo build --verbose
     - name: Run tests
       run: cargo test --verbose
+
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build (CPU only)
+      run: cargo build --verbose
+    - name: Build (Metal)
+      run: cargo build --release --features metal --verbose
+    - name: Run tests
+      run: cargo test --verbose
+    - name: Verify Metal GPU keygen
+      run: ./target/release/mc-keygen --verify A
