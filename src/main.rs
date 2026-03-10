@@ -22,6 +22,9 @@ use ratatui::{
 
 use search::SearchHandle;
 
+#[cfg(feature = "metal")]
+use metal::Device as MetalDevice;
+
 #[derive(Parser)]
 #[command(name = "mc-keygen", version, about = "MeshCore vanity Ed25519 key generator")]
 struct Cli {
@@ -357,8 +360,10 @@ fn main() {
         format!(", {} prefixes", prefixes.len())
     };
 
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[cfg(feature = "cuda")]
     let use_gpu = cli.gpu;
+    #[cfg(all(feature = "metal", not(feature = "cuda")))]
+    let use_gpu = cli.gpu || MetalDevice::system_default().is_some();
     #[cfg(not(any(feature = "cuda", feature = "metal")))]
     let use_gpu = false;
 
@@ -406,6 +411,39 @@ fn main() {
                     Err(e) => {
                         eprintln!("TUI error: {}, falling back to simple mode", e);
                         let handle = SearchHandle::start_gpu(&prefixes).unwrap();
+                        handle.finish()
+                    }
+                };
+                print_colored_result(&result);
+            }
+        }
+        #[cfg(all(feature = "metal", not(feature = "cuda")))]
+        {
+            let handle = match SearchHandle::start_hybrid(&prefixes, num_threads) {
+                Ok(h) => h,
+                Err(e) => {
+                    if cli.json {
+                        eprintln!("Error: {}", e);
+                    } else {
+                        print_colored_error(&format!("{}", e));
+                    }
+                    std::process::exit(1);
+                }
+            };
+
+            let mode_label = format!(
+                "Metal GPU + {} threads{}",
+                num_threads, prefix_count_label
+            );
+            if cli.json {
+                let result = handle.finish();
+                println!("{}", serde_json::to_string_pretty(&result).unwrap());
+            } else {
+                let result = match run_tui_loop(handle, &prefixes, expected, &mode_label) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("TUI error: {}, falling back to simple mode", e);
+                        let handle = SearchHandle::start_hybrid(&prefixes, num_threads).unwrap();
                         handle.finish()
                     }
                 };
