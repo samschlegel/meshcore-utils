@@ -22,9 +22,6 @@ use ratatui::{
 
 use search::SearchHandle;
 
-#[cfg(feature = "metal")]
-use metal::Device as MetalDevice;
-
 #[derive(Parser)]
 #[command(name = "mc-keygen", version, about = "MeshCore vanity Ed25519 key generator")]
 struct Cli {
@@ -40,10 +37,15 @@ struct Cli {
     #[arg(long)]
     json: bool,
 
-    /// Use GPU acceleration
+    /// Force CPU-only search (no GPU even if available)
     #[cfg(any(feature = "cuda", feature = "metal"))]
-    #[arg(long)]
-    gpu: bool,
+    #[arg(long, conflicts_with = "gpu_only")]
+    cpu_only: bool,
+
+    /// Force GPU-only search (no CPU threads)
+    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[arg(long, conflicts_with = "cpu_only")]
+    gpu_only: bool,
 
     /// Verify GPU keygen matches CPU (run 64 test seeds and compare)
     #[cfg(any(feature = "cuda", feature = "metal"))]
@@ -108,7 +110,7 @@ fn run_tui_loop(
     prefixes: &[String],
     expected: u64,
     mode_label: &str,
-) -> io::Result<types::SearchResult> {
+) -> io::Result<Result<types::SearchResult, types::SearchError>> {
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
@@ -325,6 +327,42 @@ fn print_colored_error(msg: &str) {
     );
 }
 
+#[allow(unused_variables)]
+fn try_init_gpu(prefixes: &[String]) -> Vec<Box<dyn search::GpuSearcher>> {
+    #[cfg(feature = "metal")]
+    {
+        match metal_gpu::MetalSearcher::new(prefixes) {
+            Ok(s) => return vec![Box::new(s)],
+            Err(e) => {
+                eprintln!("Warning: Metal GPU unavailable ({}), using CPU only", e);
+                return vec![];
+            }
+        }
+    }
+    #[cfg(feature = "cuda")]
+    {
+        match gpu::CudaSearcher::new(prefixes) {
+            Ok(s) => return vec![Box::new(s)],
+            Err(e) => {
+                eprintln!("Warning: CUDA GPU unavailable ({}), using CPU only", e);
+                return vec![];
+            }
+        }
+    }
+    #[cfg(not(any(feature = "cuda", feature = "metal")))]
+    {
+        vec![]
+    }
+}
+
+fn gpu_names_label(searchers: &[Box<dyn search::GpuSearcher>]) -> String {
+    searchers
+        .iter()
+        .map(|g| g.device_name())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -360,12 +398,15 @@ fn main() {
         format!(", {} prefixes", prefixes.len())
     };
 
-    #[cfg(feature = "cuda")]
-    let use_gpu = cli.gpu;
-    #[cfg(all(feature = "metal", not(feature = "cuda")))]
-    let use_gpu = cli.gpu || MetalDevice::system_default().is_some();
+    #[cfg(any(feature = "cuda", feature = "metal"))]
+    let cpu_only = cli.cpu_only;
     #[cfg(not(any(feature = "cuda", feature = "metal")))]
-    let use_gpu = false;
+    let cpu_only = true;
+
+    #[cfg(any(feature = "cuda", feature = "metal"))]
+    let gpu_only = cli.gpu_only;
+    #[cfg(not(any(feature = "cuda", feature = "metal")))]
+    let gpu_only = false;
 
     #[cfg(any(feature = "cuda", feature = "metal"))]
     if cli.verify {
@@ -386,85 +427,58 @@ fn main() {
         }
     }
 
-    if use_gpu {
-        #[cfg(feature = "cuda")]
-        {
-            let handle = match SearchHandle::start_gpu(&prefixes) {
-                Ok(h) => h,
-                Err(e) => {
-                    if cli.json {
-                        eprintln!("Error: {}", e);
-                    } else {
-                        print_colored_error(&format!("{}", e));
-                    }
-                    std::process::exit(1);
-                }
-            };
-
-            let mode_label = format!("GPU{}", prefix_count_label);
-            if cli.json {
-                let result = handle.finish();
-                println!("{}", serde_json::to_string_pretty(&result).unwrap());
-            } else {
-                let result = match run_tui_loop(handle, &prefixes, expected, &mode_label) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        eprintln!("TUI error: {}, falling back to simple mode", e);
-                        let handle = SearchHandle::start_gpu(&prefixes).unwrap();
-                        handle.finish()
-                    }
-                };
-                print_colored_result(&result);
-            }
-        }
-        #[cfg(all(feature = "metal", not(feature = "cuda")))]
-        {
-            let handle = match SearchHandle::start_hybrid(&prefixes, num_threads) {
-                Ok(h) => h,
-                Err(e) => {
-                    if cli.json {
-                        eprintln!("Error: {}", e);
-                    } else {
-                        print_colored_error(&format!("{}", e));
-                    }
-                    std::process::exit(1);
-                }
-            };
-
-            let mode_label = format!(
-                "Metal GPU + {} threads{}",
-                num_threads, prefix_count_label
-            );
-            if cli.json {
-                let result = handle.finish();
-                println!("{}", serde_json::to_string_pretty(&result).unwrap());
-            } else {
-                let result = match run_tui_loop(handle, &prefixes, expected, &mode_label) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        eprintln!("TUI error: {}, falling back to simple mode", e);
-                        let handle = SearchHandle::start_hybrid(&prefixes, num_threads).unwrap();
-                        handle.finish()
-                    }
-                };
-                print_colored_result(&result);
-            }
-        }
-    } else if cli.json {
-        let handle = SearchHandle::start(&prefixes, num_threads);
-        let result = handle.finish();
-        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+    let gpu_searchers = if cpu_only {
+        vec![]
     } else {
-        let mode_label = format!("{} threads{}", num_threads, prefix_count_label);
-        let handle = SearchHandle::start(&prefixes, num_threads);
-        let result = match run_tui_loop(handle, &prefixes, expected, &mode_label) {
+        try_init_gpu(&prefixes)
+    };
+
+    let (handle, mode_label) = if gpu_only {
+        if gpu_searchers.is_empty() {
+            let msg = "--gpu-only requested but no GPU available";
+            if cli.json {
+                eprintln!("Error: {}", msg);
+            } else {
+                print_colored_error(msg);
+            }
+            std::process::exit(1);
+        }
+        let label = format!("{}{}", gpu_names_label(&gpu_searchers), prefix_count_label);
+        (SearchHandle::start_gpu(&prefixes, gpu_searchers), label)
+    } else if gpu_searchers.is_empty() {
+        let label = format!("{} threads{}", num_threads, prefix_count_label);
+        (SearchHandle::start(&prefixes, num_threads), label)
+    } else {
+        let gpu_label = gpu_names_label(&gpu_searchers);
+        let label = format!("{} + {} threads{}", gpu_label, num_threads, prefix_count_label);
+        (
+            SearchHandle::start_hybrid(&prefixes, num_threads, gpu_searchers),
+            label,
+        )
+    };
+
+    if cli.json {
+        match handle.finish() {
+            Ok(result) => println!("{}", serde_json::to_string_pretty(&result).unwrap()),
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        let search_result = match run_tui_loop(handle, &prefixes, expected, &mode_label) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("TUI error: {}, falling back to simple mode", e);
-                let handle = SearchHandle::start(&prefixes, num_threads);
-                handle.finish()
+                eprintln!("TUI error: {}", e);
+                std::process::exit(1);
             }
         };
-        print_colored_result(&result);
+        match search_result {
+            Ok(result) => print_colored_result(&result),
+            Err(e) => {
+                print_colored_error(&format!("{}", e));
+                std::process::exit(1);
+            }
+        }
     }
 }

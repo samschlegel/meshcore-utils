@@ -11,16 +11,20 @@ mc-keygen <PREFIX>... [OPTIONS]
 **Options:**
 - `-t, --threads <N>` — worker threads (default: all cores)
 - `--json` — output result as JSON (no TUI, no color)
-- `--gpu` — use CUDA GPU acceleration (requires `cuda` feature)
+- `--cpu-only` — force CPU-only search, skip GPU even if available (requires `cuda` or `metal` feature)
+- `--gpu-only` — force GPU-only search, no CPU threads (requires `cuda` or `metal` feature)
 - `--verify` — cross-check GPU keygen against CPU (requires `cuda` or `metal` feature)
+
+When built with GPU support (`cuda` or `metal` feature), the default mode is **hybrid**: both CPU threads and GPU run concurrently, and the first match from either wins. If no GPU is detected at runtime, the tool falls back to CPU-only with a warning.
 
 **Examples:**
 ```bash
-mc-keygen AB             # find a key starting with AB
+mc-keygen AB             # find a key starting with AB (hybrid if GPU available)
 mc-keygen AB CD EF       # find a key matching ANY of these prefixes
 mc-keygen DEAD -t 4      # use 4 threads
 mc-keygen AB --json      # machine-readable output
-mc-keygen ABCDEF --gpu   # use GPU for longer prefixes
+mc-keygen ABCDEF --gpu-only   # GPU only for longer prefixes
+mc-keygen AB --cpu-only       # force CPU even when GPU is available
 ```
 
 Multiple prefixes can be passed in a single invocation — every key is checked against all of them, so searching for N prefixes is ~N× more efficient than N separate runs. The JSON output includes a `matched_prefix` field.
@@ -46,13 +50,11 @@ Each hex character multiplies expected attempts by 16:
 
 ```bash
 cargo build --release                    # CPU only
-cargo build --release --features cuda    # NVIDIA GPU (requires CUDA Toolkit)
-cargo build --release --features metal   # Apple GPU (macOS, Apple Silicon)
+cargo build --release --features cuda    # with NVIDIA GPU support
+cargo build --release --features metal   # with Apple Metal GPU support
 ```
 
-NVIDIA GPU support requires the CUDA Toolkit. See [docs/gpu.md](docs/gpu.md) for setup details.
-
-Apple Metal builds auto-detect the GPU and run hybrid CPU+GPU mode by default.
+CUDA support requires the NVIDIA CUDA Toolkit. Metal support requires macOS with an Apple Silicon or AMD GPU. See [docs/gpu.md](docs/gpu.md) for details.
 
 ## How it works
 

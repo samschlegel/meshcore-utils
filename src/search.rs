@@ -7,9 +7,26 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 
 use crate::keygen::generate_keypair;
-use crate::types::{MeshCoreKeypair, SearchResult, SearchStats};
+use crate::types::{MeshCoreKeypair, SearchError, SearchResult, SearchStats};
 
 const BATCH_SIZE: u64 = 1024;
+
+/// Result from a single GPU batch dispatch.
+pub struct GpuBatchResult {
+    pub keys_checked: u64,
+    pub keypair: Option<MeshCoreKeypair>,
+}
+
+/// Trait abstracting GPU vanity key search backends (Metal, CUDA, etc.).
+/// Each implementor owns a single GPU device and is used from one thread.
+pub trait GpuSearcher: Send {
+    fn search_batch(
+        &mut self,
+        base_nonce: u64,
+    ) -> Result<GpuBatchResult, Box<dyn std::error::Error + Send + Sync>>;
+
+    fn device_name(&self) -> &str;
+}
 
 /// Parsed prefix for fast nibble-level matching.
 /// Avoids hex-encoding every public key in the hot loop.
@@ -185,94 +202,35 @@ impl SearchHandle {
     }
 
     /// Join all worker threads and return the result.
-    pub fn finish(self) -> SearchResult {
+    /// Returns `Err` if all workers exited without finding a match (e.g., GPU errors).
+    pub fn finish(self) -> Result<SearchResult, SearchError> {
         for h in self.workers {
             h.join().unwrap();
         }
 
         let elapsed = self.start.elapsed().as_secs_f64();
         let attempts = self.attempts.load(Ordering::Relaxed);
-        let m = self.result.lock().unwrap().take().expect("search found a key");
 
-        SearchResult {
-            public_key: hex::encode_upper(m.keypair.public_key),
-            private_key: hex::encode_upper(m.keypair.private_key),
-            matched_prefix: m.matched_prefix,
-            attempts,
-            elapsed_secs: elapsed,
+        match self.result.lock().unwrap().take() {
+            Some(m) => Ok(SearchResult {
+                public_key: hex::encode_upper(m.keypair.public_key),
+                private_key: hex::encode_upper(m.keypair.private_key),
+                matched_prefix: m.matched_prefix,
+                attempts,
+                elapsed_secs: elapsed,
+            }),
+            None => Err(SearchError {
+                attempts,
+                elapsed_secs: elapsed,
+            }),
         }
     }
 
-    /// Start a vanity key search on GPU. Spawns a single thread that runs the
-    /// GPU launch loop, updating the same atomics as the CPU path.
-    #[cfg(feature = "cuda")]
-    pub fn start_gpu(prefixes: &[String]) -> Result<Self, crate::gpu::GpuError> {
-        let found = Arc::new(AtomicBool::new(false));
-        let attempts = Arc::new(AtomicU64::new(0));
-        let result: Arc<Mutex<Option<MatchResult>>> = Arc::new(Mutex::new(None));
-
-        let mut gpu_searcher = crate::gpu::GpuSearcher::new(prefixes)?;
-        let prefixes_owned: Vec<String> = prefixes.to_vec();
-
-        let found_clone = Arc::clone(&found);
-        let attempts_clone = Arc::clone(&attempts);
-        let result_clone = Arc::clone(&result);
-
-        let worker = thread::spawn(move || {
-            // Use OS randomness for the initial nonce so different runs don't overlap
-            let mut nonce_bytes = [0u8; 8];
-            OsRng.fill_bytes(&mut nonce_bytes);
-            let mut base_nonce: u64 = u64::from_le_bytes(nonce_bytes);
-
-            // Build CPU-side matchers for identifying which prefix matched
-            let matchers: Vec<(String, PrefixMatcher)> = prefixes_owned
-                .iter()
-                .map(|p| (p.clone(), PrefixMatcher::new(p)))
-                .collect();
-
-            while !found_clone.load(Ordering::Relaxed) {
-                match gpu_searcher.search_batch(base_nonce) {
-                    Ok(batch_result) => {
-                        attempts_clone.fetch_add(batch_result.keys_checked, Ordering::Relaxed);
-                        if let Some(kp) = batch_result.keypair {
-                            found_clone.store(true, Ordering::Relaxed);
-                            // Identify which prefix matched
-                            let matched_prefix = matchers
-                                .iter()
-                                .find(|(_, m)| m.matches(&kp.public_key))
-                                .map(|(p, _)| p.clone())
-                                .unwrap_or_else(|| prefixes_owned[0].clone());
-                            *result_clone.lock().unwrap() = Some(MatchResult {
-                                keypair: kp,
-                                matched_prefix,
-                            });
-                            return;
-                        }
-                        base_nonce = base_nonce.wrapping_add(batch_result.keys_checked);
-                    }
-                    Err(e) => {
-                        eprintln!("GPU error: {}", e);
-                        return;
-                    }
-                }
-            }
-        });
-
-        Ok(SearchHandle {
-            found,
-            attempts,
-            result,
-            start: Instant::now(),
-            workers: vec![worker],
-        })
-    }
-
-    /// Start a hybrid vanity key search: CPU threads + Metal GPU concurrently.
-    #[cfg(feature = "metal")]
-    pub fn start_hybrid(
+    /// Start a GPU-only vanity key search. Spawns one thread per GPU device.
+    pub fn start_gpu(
         prefixes: &[String],
-        cpu_threads: usize,
-    ) -> Result<Self, crate::metal_gpu::MetalError> {
+        gpu_searchers: Vec<Box<dyn GpuSearcher>>,
+    ) -> Self {
         let matchers: Arc<Vec<(String, PrefixMatcher)>> = Arc::new(
             prefixes
                 .iter()
@@ -283,9 +241,45 @@ impl SearchHandle {
         let attempts = Arc::new(AtomicU64::new(0));
         let result: Arc<Mutex<Option<MatchResult>>> = Arc::new(Mutex::new(None));
 
-        let mut workers = Vec::with_capacity(cpu_threads + 1);
+        let mut workers = Vec::with_capacity(gpu_searchers.len());
+        for searcher in gpu_searchers {
+            workers.push(thread::spawn({
+                let matchers = Arc::clone(&matchers);
+                let found = Arc::clone(&found);
+                let attempts = Arc::clone(&attempts);
+                let result = Arc::clone(&result);
+                move || gpu_dispatch_loop(searcher, matchers, found, attempts, result)
+            }));
+        }
 
-        // Spawn CPU workers — same loop body as start()
+        SearchHandle {
+            found,
+            attempts,
+            result,
+            start: Instant::now(),
+            workers,
+        }
+    }
+
+    /// Start a hybrid vanity key search: CPU threads + GPU devices concurrently.
+    pub fn start_hybrid(
+        prefixes: &[String],
+        cpu_threads: usize,
+        gpu_searchers: Vec<Box<dyn GpuSearcher>>,
+    ) -> Self {
+        let matchers: Arc<Vec<(String, PrefixMatcher)>> = Arc::new(
+            prefixes
+                .iter()
+                .map(|p| (p.clone(), PrefixMatcher::new(p)))
+                .collect(),
+        );
+        let found = Arc::new(AtomicBool::new(false));
+        let attempts = Arc::new(AtomicU64::new(0));
+        let result: Arc<Mutex<Option<MatchResult>>> = Arc::new(Mutex::new(None));
+
+        let mut workers = Vec::with_capacity(cpu_threads + gpu_searchers.len());
+
+        // Spawn CPU workers
         for _ in 0..cpu_threads {
             let matchers = Arc::clone(&matchers);
             let found = Arc::clone(&found);
@@ -326,57 +320,64 @@ impl SearchHandle {
             }));
         }
 
-        // Spawn Metal GPU dispatch thread
-        let metal_searcher = crate::metal_gpu::MetalSearcher::new(prefixes)?;
-        let prefixes_owned: Vec<String> = prefixes.to_vec();
-        let found_clone = Arc::clone(&found);
-        let attempts_clone = Arc::clone(&attempts);
-        let result_clone = Arc::clone(&result);
+        // Spawn GPU dispatch threads
+        for searcher in gpu_searchers {
+            workers.push(thread::spawn({
+                let matchers = Arc::clone(&matchers);
+                let found = Arc::clone(&found);
+                let attempts = Arc::clone(&attempts);
+                let result = Arc::clone(&result);
+                move || gpu_dispatch_loop(searcher, matchers, found, attempts, result)
+            }));
+        }
 
-        workers.push(thread::spawn(move || {
-            let mut nonce_bytes = [0u8; 8];
-            OsRng.fill_bytes(&mut nonce_bytes);
-            let mut base_nonce: u64 = u64::from_le_bytes(nonce_bytes);
-
-            let matchers: Vec<(String, PrefixMatcher)> = prefixes_owned
-                .iter()
-                .map(|p| (p.clone(), PrefixMatcher::new(p)))
-                .collect();
-
-            while !found_clone.load(Ordering::Relaxed) {
-                match metal_searcher.search_batch(base_nonce) {
-                    Ok(batch_result) => {
-                        attempts_clone.fetch_add(batch_result.keys_checked, Ordering::Relaxed);
-                        if let Some(kp) = batch_result.keypair {
-                            found_clone.store(true, Ordering::Relaxed);
-                            let matched_prefix = matchers
-                                .iter()
-                                .find(|(_, m)| m.matches(&kp.public_key))
-                                .map(|(p, _)| p.clone())
-                                .unwrap_or_else(|| prefixes_owned[0].clone());
-                            *result_clone.lock().unwrap() = Some(MatchResult {
-                                keypair: kp,
-                                matched_prefix,
-                            });
-                            return;
-                        }
-                        base_nonce = base_nonce.wrapping_add(batch_result.keys_checked);
-                    }
-                    Err(e) => {
-                        eprintln!("Metal GPU error: {}", e);
-                        return;
-                    }
-                }
-            }
-        }));
-
-        Ok(SearchHandle {
+        SearchHandle {
             found,
             attempts,
             result,
             start: Instant::now(),
             workers,
-        })
+        }
+    }
+}
+
+/// GPU dispatch loop shared by start_gpu and start_hybrid.
+/// Runs search_batch in a loop until a match is found or another thread signals done.
+fn gpu_dispatch_loop(
+    mut searcher: Box<dyn GpuSearcher>,
+    matchers: Arc<Vec<(String, PrefixMatcher)>>,
+    found: Arc<AtomicBool>,
+    attempts: Arc<AtomicU64>,
+    result: Arc<Mutex<Option<MatchResult>>>,
+) {
+    let mut nonce_bytes = [0u8; 8];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let mut base_nonce: u64 = u64::from_le_bytes(nonce_bytes);
+
+    while !found.load(Ordering::Relaxed) {
+        match searcher.search_batch(base_nonce) {
+            Ok(batch_result) => {
+                attempts.fetch_add(batch_result.keys_checked, Ordering::Relaxed);
+                if let Some(kp) = batch_result.keypair {
+                    found.store(true, Ordering::Relaxed);
+                    let matched_prefix = matchers
+                        .iter()
+                        .find(|(_, m)| m.matches(&kp.public_key))
+                        .map(|(p, _)| p.clone())
+                        .unwrap_or_else(|| matchers[0].0.clone());
+                    *result.lock().unwrap() = Some(MatchResult {
+                        keypair: kp,
+                        matched_prefix,
+                    });
+                    return;
+                }
+                base_nonce = base_nonce.wrapping_add(batch_result.keys_checked);
+            }
+            Err(e) => {
+                eprintln!("GPU error ({}): {}", searcher.device_name(), e);
+                return;
+            }
+        }
     }
 }
 
@@ -468,7 +469,7 @@ mod tests {
     #[test]
     fn search_handle_finds_single_char_prefix() {
         let handle = SearchHandle::start(&["A".to_string()], 2);
-        let result = handle.finish();
+        let result = handle.finish().expect("search should find a match");
         assert!(
             result.public_key.starts_with('A'),
             "expected public key starting with A, got {}",
@@ -480,7 +481,7 @@ mod tests {
     #[test]
     fn search_handle_multiple_prefixes() {
         let handle = SearchHandle::start(&["A".to_string(), "B".to_string()], 2);
-        let result = handle.finish();
+        let result = handle.finish().expect("search should find a match");
         assert!(
             result.public_key.starts_with('A') || result.public_key.starts_with('B'),
             "expected public key starting with A or B, got {}",

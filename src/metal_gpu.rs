@@ -15,11 +15,6 @@ const KERNEL_SRC: &str = include_str!("../metal/vanity_kernel.metal");
 const BLOCK_SIZE: u64 = 256;
 const ITERS_PER_THREAD: u64 = 64;
 
-pub struct MetalBatchResult {
-    pub keys_checked: u64,
-    pub keypair: Option<MeshCoreKeypair>,
-}
-
 pub struct MetalSearcher {
     queue: CommandQueue,
     pipeline: ComputePipelineState,
@@ -29,6 +24,7 @@ pub struct MetalSearcher {
     prefix_count: u32,
     grid_size: u64,
     threadgroup_size: u64,
+    device_name: String,
 }
 
 #[derive(Debug)]
@@ -60,6 +56,7 @@ fn compile_kernel(device: &Device) -> Result<metal::Library, MetalError> {
 impl MetalSearcher {
     pub fn new(prefixes: &[String]) -> Result<Self, MetalError> {
         let device = Device::system_default().ok_or(MetalError::NoMetalDevice)?;
+        let device_name = format!("Metal GPU ({})", device.name());
         let library = compile_kernel(&device)?;
 
         let func = library
@@ -111,10 +108,11 @@ impl MetalSearcher {
             prefix_count,
             grid_size,
             threadgroup_size,
+            device_name,
         })
     }
 
-    pub fn search_batch(&self, base_nonce: u64) -> Result<MetalBatchResult, MetalError> {
+    pub fn search_batch(&self, base_nonce: u64) -> Result<crate::search::GpuBatchResult, MetalError> {
         let keys_checked = self.grid_size * ITERS_PER_THREAD;
 
         // Zero the result buffer
@@ -183,10 +181,24 @@ impl MetalSearcher {
             None
         };
 
-        Ok(MetalBatchResult {
+        Ok(crate::search::GpuBatchResult {
             keys_checked,
             keypair,
         })
+    }
+}
+
+impl crate::search::GpuSearcher for MetalSearcher {
+    fn search_batch(
+        &mut self,
+        base_nonce: u64,
+    ) -> Result<crate::search::GpuBatchResult, Box<dyn std::error::Error + Send + Sync>> {
+        // MetalSearcher::search_batch takes &self, so this just delegates
+        Ok(MetalSearcher::search_batch(self, base_nonce)?)
+    }
+
+    fn device_name(&self) -> &str {
+        &self.device_name
     }
 }
 

@@ -13,49 +13,50 @@ const BLOCK_SIZE: u32 = 256;
 const ITERS_PER_THREAD: u64 = 64;
 
 /// Result from a single GPU batch launch.
-pub struct GpuBatchResult {
+pub struct CudaBatchResult {
     pub keys_checked: u64,
     pub keypair: Option<MeshCoreKeypair>,
 }
 
 /// GPU vanity key searcher using CUDA.
-pub struct GpuSearcher {
+pub struct CudaSearcher {
     stream: Arc<CudaStream>,
     func: CudaFunction,
     result_buf: CudaSlice<u8>,
     grid_size: u32,
     prefix_data: Vec<u8>,
     prefix_count: u32,
+    device_name: String,
 }
 
 /// GPU search errors.
 #[derive(Debug)]
-pub enum GpuError {
+pub enum CudaError {
     NoCudaDevice,
     CudaDriver(String),
     Compilation(String),
 }
 
-impl fmt::Display for GpuError {
+impl fmt::Display for CudaError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            GpuError::NoCudaDevice => write!(f, "no CUDA-capable GPU found"),
-            GpuError::CudaDriver(e) => write!(f, "CUDA driver error: {}", e),
-            GpuError::Compilation(e) => write!(f, "CUDA kernel compilation error: {}", e),
+            CudaError::NoCudaDevice => write!(f, "no CUDA-capable GPU found"),
+            CudaError::CudaDriver(e) => write!(f, "CUDA driver error: {}", e),
+            CudaError::Compilation(e) => write!(f, "CUDA kernel compilation error: {}", e),
         }
     }
 }
 
-impl std::error::Error for GpuError {}
+impl std::error::Error for CudaError {}
 
 /// Compile the kernel and return (module, context, stream).
-fn compile_kernel() -> Result<(Arc<CudaModule>, Arc<CudaStream>), GpuError> {
+fn compile_kernel() -> Result<(Arc<CudaModule>, Arc<CudaStream>), CudaError> {
     let ctx = CudaContext::new(0).map_err(|e| {
         let msg = format!("{}", e);
         if msg.contains("no device") || msg.contains("not found") {
-            GpuError::NoCudaDevice
+            CudaError::NoCudaDevice
         } else {
-            GpuError::CudaDriver(msg)
+            CudaError::CudaDriver(msg)
         }
     })?;
 
@@ -68,30 +69,30 @@ fn compile_kernel() -> Result<(Arc<CudaModule>, Arc<CudaStream>), GpuError> {
             ..Default::default()
         },
     )
-    .map_err(|e| GpuError::Compilation(format!("{}", e)))?;
+    .map_err(|e| CudaError::Compilation(format!("{}", e)))?;
 
     let module = ctx
         .load_module(ptx)
-        .map_err(|e| GpuError::CudaDriver(format!("{}", e)))?;
+        .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
 
     let stream = ctx.default_stream();
     Ok((module, stream))
 }
 
-impl GpuSearcher {
+impl CudaSearcher {
     /// Compile the CUDA kernel and prepare for searching.
     /// Packs prefixes into a buffer: [count: u32][nibbles0: u32][bytes0..padded to 4][nibbles1: u32][bytes1..]...]
-    pub fn new(prefixes: &[String]) -> Result<Self, GpuError> {
+    pub fn new(prefixes: &[String]) -> Result<Self, CudaError> {
         let (module, stream) = compile_kernel()?;
 
         let func = module
             .load_function("vanity_search")
-            .map_err(|e| GpuError::CudaDriver(format!("{}", e)))?;
+            .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
 
         let ctx = stream.context();
         let sm_count = ctx
             .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
-            .map_err(|e| GpuError::CudaDriver(format!("{}", e)))?;
+            .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
         let grid_size = (sm_count as u32) * 2;
 
         // Pack prefix data: [count: u32] then for each prefix: [nibbles: u32][bytes..padded to 4 alignment]
@@ -116,31 +117,37 @@ impl GpuSearcher {
 
         let result_buf = stream
             .alloc_zeros::<u8>(100)
-            .map_err(|e| GpuError::CudaDriver(format!("{}", e)))?;
+            .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
 
-        Ok(GpuSearcher {
+        let device_name = ctx
+            .name()
+            .map(|n| format!("CUDA GPU ({})", n))
+            .unwrap_or_else(|_| "CUDA GPU".to_string());
+
+        Ok(CudaSearcher {
             stream,
             func,
             result_buf,
             grid_size,
             prefix_data,
             prefix_count,
+            device_name,
         })
     }
 
     /// Launch one batch of GPU kernel and check for results.
-    pub fn search_batch(&mut self, base_nonce: u64) -> Result<GpuBatchResult, GpuError> {
+    pub fn search_batch(&mut self, base_nonce: u64) -> Result<CudaBatchResult, CudaError> {
         let total_threads = (self.grid_size * BLOCK_SIZE) as u64;
         let keys_checked = total_threads * ITERS_PER_THREAD;
 
         self.stream
             .memset_zeros(&mut self.result_buf)
-            .map_err(|e| GpuError::CudaDriver(format!("{}", e)))?;
+            .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
 
         let prefix_dev = self
             .stream
             .clone_htod(&self.prefix_data)
-            .map_err(|e| GpuError::CudaDriver(format!("{}", e)))?;
+            .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
 
         let cfg = LaunchConfig {
             grid_dim: (self.grid_size, 1, 1),
@@ -158,16 +165,16 @@ impl GpuSearcher {
                 .arg(&ITERS_PER_THREAD)
                 .launch(cfg)
         }
-        .map_err(|e| GpuError::CudaDriver(format!("{}", e)))?;
+        .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
 
         self.stream
             .synchronize()
-            .map_err(|e| GpuError::CudaDriver(format!("{}", e)))?;
+            .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
 
         let result_host: Vec<u8> = self
             .stream
             .clone_dtoh(&self.result_buf)
-            .map_err(|e| GpuError::CudaDriver(format!("{}", e)))?;
+            .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
 
         let found_flag = u32::from_le_bytes([
             result_host[0],
@@ -189,23 +196,40 @@ impl GpuSearcher {
             None
         };
 
-        Ok(GpuBatchResult {
+        Ok(CudaBatchResult {
             keys_checked,
             keypair,
         })
     }
 }
 
+impl crate::search::GpuSearcher for CudaSearcher {
+    fn search_batch(
+        &mut self,
+        base_nonce: u64,
+    ) -> Result<crate::search::GpuBatchResult, Box<dyn std::error::Error + Send + Sync>> {
+        let result = self.search_batch(base_nonce)?;
+        Ok(crate::search::GpuBatchResult {
+            keys_checked: result.keys_checked,
+            keypair: result.keypair,
+        })
+    }
+
+    fn device_name(&self) -> &str {
+        &self.device_name
+    }
+}
+
 /// Run GPU vs CPU verification on a set of test seeds.
 /// Returns Ok(()) if all keys match, Err with details on mismatch.
-pub fn verify_gpu_keygen() -> Result<(), GpuError> {
+pub fn verify_gpu_keygen() -> Result<(), CudaError> {
     use crate::keygen::generate_keypair;
 
     let (module, stream) = compile_kernel()?;
 
     let verify_func = module
         .load_function("verify_keygen")
-        .map_err(|e| GpuError::CudaDriver(format!("{}", e)))?;
+        .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
 
     // Generate test seeds
     let count: u32 = 64;
@@ -222,13 +246,13 @@ pub fn verify_gpu_keygen() -> Result<(), GpuError> {
     // Upload seeds
     let seeds_dev = stream
         .clone_htod(&seeds_flat)
-        .map_err(|e| GpuError::CudaDriver(format!("{}", e)))?;
+        .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
     let mut pubkeys_dev = stream
         .alloc_zeros::<u8>(count as usize * 32)
-        .map_err(|e| GpuError::CudaDriver(format!("{}", e)))?;
+        .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
     let mut privkeys_dev = stream
         .alloc_zeros::<u8>(count as usize * 64)
-        .map_err(|e| GpuError::CudaDriver(format!("{}", e)))?;
+        .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
 
     let cfg = LaunchConfig {
         grid_dim: (1, 1, 1),
@@ -245,18 +269,18 @@ pub fn verify_gpu_keygen() -> Result<(), GpuError> {
             .arg(&count)
             .launch(cfg)
     }
-    .map_err(|e| GpuError::CudaDriver(format!("{}", e)))?;
+    .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
 
     stream
         .synchronize()
-        .map_err(|e| GpuError::CudaDriver(format!("{}", e)))?;
+        .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
 
     let gpu_pubkeys: Vec<u8> = stream
         .clone_dtoh(&pubkeys_dev)
-        .map_err(|e| GpuError::CudaDriver(format!("{}", e)))?;
+        .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
     let gpu_privkeys: Vec<u8> = stream
         .clone_dtoh(&privkeys_dev)
-        .map_err(|e| GpuError::CudaDriver(format!("{}", e)))?;
+        .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
 
     // Cross-check against CPU
     let mut pass = 0;
@@ -291,7 +315,7 @@ pub fn verify_gpu_keygen() -> Result<(), GpuError> {
 
     eprintln!("{}/{} keys matched (GPU vs CPU)", pass, count);
     if fail > 0 {
-        Err(GpuError::CudaDriver(format!(
+        Err(CudaError::CudaDriver(format!(
             "{} of {} keys mismatched between GPU and CPU",
             fail, count
         )))
