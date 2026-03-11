@@ -12,7 +12,7 @@ mc-keygen <PREFIX>... [OPTIONS]
 - `-t, --threads <N>` — worker threads (default: all cores)
 - `--json` — output result as JSON (no TUI, no color)
 - `--gpu` — use CUDA GPU acceleration (requires `cuda` feature)
-- `--verify` — cross-check GPU keygen against CPU (requires `cuda` feature)
+- `--verify` — cross-check GPU keygen against CPU (requires `cuda` or `metal` feature)
 
 **Examples:**
 ```bash
@@ -46,10 +46,13 @@ Each hex character multiplies expected attempts by 16:
 
 ```bash
 cargo build --release                    # CPU only
-cargo build --release --features cuda    # with GPU support
+cargo build --release --features cuda    # NVIDIA GPU (requires CUDA Toolkit)
+cargo build --release --features metal   # Apple GPU (macOS, Apple Silicon)
 ```
 
-GPU support requires the NVIDIA CUDA Toolkit. See [docs/gpu.md](docs/gpu.md) for setup details.
+NVIDIA GPU support requires the CUDA Toolkit. See [docs/gpu.md](docs/gpu.md) for setup details.
+
+Apple Metal builds auto-detect the GPU and run hybrid CPU+GPU mode by default.
 
 ## How it works
 
