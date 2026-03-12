@@ -203,6 +203,9 @@ impl crate::search::GpuSearcher for MetalSearcher {
 }
 
 /// Run Metal GPU vs CPU verification on 64 test seeds.
+///
+/// Used by both the `--verify` CLI flag and `#[test]` to cross-check
+/// GPU keygen output against the CPU reference implementation.
 pub fn verify_gpu_keygen() -> Result<(), MetalError> {
     use crate::keygen::generate_keypair;
 
@@ -286,8 +289,8 @@ pub fn verify_gpu_keygen() -> Result<(), MetalError> {
             eprintln!("MISMATCH seed #{}", i);
             eprintln!("  CPU pubkey:  {}", hex::encode_upper(&cpu_kp.public_key));
             eprintln!("  GPU pubkey:  {}", hex::encode_upper(gpu_pub));
-            eprintln!("  CPU privkey: {}", hex::encode_upper(&cpu_kp.private_key));
-            eprintln!("  GPU privkey: {}", hex::encode_upper(gpu_priv));
+            eprintln!("  CPU privkey: {}...(truncated)", &hex::encode_upper(&cpu_kp.private_key)[..16]);
+            eprintln!("  GPU privkey: {}...(truncated)", &hex::encode_upper(gpu_priv)[..16]);
             if fail >= 5 {
                 eprintln!("  (stopping after 5 mismatches)");
                 break;
@@ -303,5 +306,21 @@ pub fn verify_gpu_keygen() -> Result<(), MetalError> {
         )))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_gpu_keygen_matches_cpu() {
+        match verify_gpu_keygen() {
+            Ok(()) => {}
+            Err(MetalError::NoMetalDevice) => {
+                eprintln!("no Metal device available, skipping GPU verification");
+            }
+            Err(e) => panic!("GPU keygen verification failed: {}", e),
+        }
     }
 }

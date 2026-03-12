@@ -21,6 +21,20 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
 
+  build-cuda:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - uses: Jimver/cuda-toolkit@v0.2.30
+      id: cuda-toolkit
+      with:
+        cuda: '13.1.0'
+    - name: Build (CUDA)
+      run: cargo build --release --features cuda --verbose
+    - name: Run tests
+      run: cargo test --features cuda --verbose
+
   build-macos:
     runs-on: macos-latest
 
@@ -31,6 +45,4 @@ jobs:
     - name: Build (Metal)
       run: cargo build --release --features metal --verbose
     - name: Run tests
-      run: cargo test --verbose
-    - name: Verify Metal GPU keygen
-      run: ./target/release/mc-keygen --verify A
+      run: cargo test --features metal --verbose

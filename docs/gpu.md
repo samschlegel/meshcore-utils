@@ -29,7 +29,18 @@ The Ed25519 field arithmetic uses the ref10 implementation (radix-2^25.5, int32[
 
 ## Verification
 
-Use `--verify` to cross-check GPU-generated keys against the CPU implementation. This is useful for validating correctness after modifying the CUDA kernel.
+GPU keygen correctness is verified by comparing 64 deterministic test seeds against the CPU reference implementation. This runs automatically in CI via `cargo test`:
+
+```bash
+cargo test --features cuda    # CUDA (skips gracefully if no GPU device)
+cargo test --features metal   # Metal (runs full verification on macOS)
+```
+
+For manual verification, use the `--verify` CLI flag:
+
+```bash
+mc-keygen --verify A
+```
 
 ## Sources
 

@@ -222,6 +222,9 @@ impl crate::search::GpuSearcher for CudaSearcher {
 
 /// Run GPU vs CPU verification on a set of test seeds.
 /// Returns Ok(()) if all keys match, Err with details on mismatch.
+///
+/// Used by both the `--verify` CLI flag and `#[test]` to cross-check
+/// GPU keygen output against the CPU reference implementation.
 pub fn verify_gpu_keygen() -> Result<(), CudaError> {
     use crate::keygen::generate_keypair;
 
@@ -304,8 +307,8 @@ pub fn verify_gpu_keygen() -> Result<(), CudaError> {
             eprintln!("MISMATCH seed #{}", i);
             eprintln!("  CPU pubkey:  {}", hex::encode_upper(&cpu_kp.public_key));
             eprintln!("  GPU pubkey:  {}", hex::encode_upper(gpu_pub));
-            eprintln!("  CPU privkey: {}", hex::encode_upper(&cpu_kp.private_key));
-            eprintln!("  GPU privkey: {}", hex::encode_upper(gpu_priv));
+            eprintln!("  CPU privkey: {}...(truncated)", &hex::encode_upper(&cpu_kp.private_key)[..16]);
+            eprintln!("  GPU privkey: {}...(truncated)", &hex::encode_upper(gpu_priv)[..16]);
             if fail >= 5 {
                 eprintln!("  (stopping after 5 mismatches)");
                 break;
@@ -321,5 +324,37 @@ pub fn verify_gpu_keygen() -> Result<(), CudaError> {
         )))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_gpu_keygen_matches_cpu() {
+        // cudarc panics if the CUDA shared library isn't installed at all
+        // (e.g. CI runners without GPU drivers). catch_unwind lets us
+        // treat that the same as NoCudaDevice — a graceful skip.
+        let result = std::panic::catch_unwind(verify_gpu_keygen);
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(CudaError::NoCudaDevice)) => {
+                eprintln!("no CUDA device available, skipping GPU verification");
+            }
+            Ok(Err(e)) => panic!("GPU keygen verification failed: {}", e),
+            Err(payload) => {
+                let msg = payload
+                    .downcast_ref::<String>()
+                    .map(|s| s.as_str())
+                    .or_else(|| payload.downcast_ref::<&str>().copied())
+                    .unwrap_or("");
+                if msg.contains("libcuda") || msg.contains("libnvcuda") {
+                    eprintln!("CUDA driver not installed, skipping GPU verification");
+                } else {
+                    std::panic::resume_unwind(payload);
+                }
+            }
+        }
     }
 }
