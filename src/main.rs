@@ -1,10 +1,10 @@
 mod keygen;
 #[cfg(feature = "cuda")]
 mod gpu;
-#[cfg(feature = "cuda")]
-mod philox;
 #[cfg(feature = "metal")]
 mod metal_gpu;
+#[cfg(any(feature = "cuda", feature = "metal"))]
+mod philox;
 mod search;
 mod types;
 

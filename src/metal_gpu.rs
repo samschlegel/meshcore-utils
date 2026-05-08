@@ -20,11 +20,14 @@ pub struct MetalSearcher {
     pipeline: ComputePipelineState,
     result_buf: Buffer,
     prefix_buf: Buffer,
-    salt_buf: Buffer,
     prefix_count: u32,
     grid_size: u64,
     threadgroup_size: u64,
     device_name: String,
+    /// Philox key, drawn fresh from OsRng per searcher. Provides 128 bits of
+    /// secret entropy that gates the entire (key, counter) -> keypair derivation.
+    key0: u64,
+    key1: u64,
 }
 
 #[derive(Debug)]
@@ -97,34 +100,32 @@ impl MetalSearcher {
             prefix_data.len() as u64,
             MTLResourceOptions::StorageModeShared,
         );
-        let salt_buf = device.new_buffer(24, MTLResourceOptions::StorageModeShared);
+
+        let mut key_bytes = [0u8; 16];
+        OsRng.fill_bytes(&mut key_bytes);
+        let key0 = u64::from_le_bytes(key_bytes[0..8].try_into().unwrap());
+        let key1 = u64::from_le_bytes(key_bytes[8..16].try_into().unwrap());
 
         Ok(MetalSearcher {
             queue,
             pipeline,
             result_buf,
             prefix_buf,
-            salt_buf,
             prefix_count,
             grid_size,
             threadgroup_size,
             device_name,
+            key0,
+            key1,
         })
     }
 
-    pub fn search_batch(&self, base_nonce: u64) -> Result<crate::search::GpuBatchResult, MetalError> {
+    pub fn search_batch(&self, base_counter: u64) -> Result<crate::search::GpuBatchResult, MetalError> {
         let keys_checked = self.grid_size * ITERS_PER_THREAD;
 
         // Zero the result buffer
         unsafe {
             std::ptr::write_bytes(self.result_buf.contents() as *mut u8, 0, 100);
-        }
-
-        // Generate fresh 24-byte random salt for seed entropy (bytes 8-31)
-        unsafe {
-            let salt_ptr = self.salt_buf.contents() as *mut u8;
-            let salt_slice = std::slice::from_raw_parts_mut(salt_ptr, 24);
-            OsRng.fill_bytes(salt_slice);
         }
 
         let cmd_buf = self.queue.new_command_buffer();
@@ -140,14 +141,23 @@ impl MetalSearcher {
         encoder.set_bytes(
             3,
             std::mem::size_of::<u64>() as u64,
-            &base_nonce as *const u64 as *const c_void,
+            &self.key0 as *const u64 as *const c_void,
         );
         encoder.set_bytes(
             4,
             std::mem::size_of::<u64>() as u64,
+            &self.key1 as *const u64 as *const c_void,
+        );
+        encoder.set_bytes(
+            5,
+            std::mem::size_of::<u64>() as u64,
+            &base_counter as *const u64 as *const c_void,
+        );
+        encoder.set_bytes(
+            6,
+            std::mem::size_of::<u64>() as u64,
             &ITERS_PER_THREAD as *const u64 as *const c_void,
         );
-        encoder.set_buffer(5, Some(&self.salt_buf), 0);
 
         let grid = MTLSize::new(self.grid_size, 1, 1);
         let threadgroup = MTLSize::new(self.threadgroup_size, 1, 1);
@@ -193,7 +203,8 @@ impl crate::search::GpuSearcher for MetalSearcher {
         &mut self,
         base_nonce: u64,
     ) -> Result<crate::search::GpuBatchResult, Box<dyn std::error::Error + Send + Sync>> {
-        // MetalSearcher::search_batch takes &self, so this just delegates
+        // The trait still calls this `base_nonce`; for the Metal backend it's
+        // the Philox counter offset.
         Ok(MetalSearcher::search_batch(self, base_nonce)?)
     }
 
@@ -202,9 +213,13 @@ impl crate::search::GpuSearcher for MetalSearcher {
     }
 }
 
-/// Run Metal GPU vs CPU verification on 64 test seeds.
+/// Run Metal GPU vs CPU verification: launch the verify kernel with a fixed
+/// Philox key, then reproduce the same Philox -> clamp -> scalarmult flow on
+/// the host and compare. Validates both the device Philox impl and device
+/// Ed25519 math.
 pub fn verify_gpu_keygen() -> Result<(), MetalError> {
-    use crate::keygen::generate_keypair;
+    use crate::keygen::generate_keypair_from_random_bytes;
+    use crate::philox::philox_block32;
 
     let device = Device::system_default().ok_or(MetalError::NoMetalDevice)?;
     let library = compile_kernel(&device)?;
@@ -218,21 +233,11 @@ pub fn verify_gpu_keygen() -> Result<(), MetalError> {
 
     let queue = device.new_command_queue();
 
+    // Fixed key so the test is deterministic across runs.
+    let key0: u64 = 0x0123456789abcdef;
+    let key1: u64 = 0xfedcba9876543210;
     let count: u32 = 64;
-    let mut seeds_flat = vec![0u8; count as usize * 32];
-    for i in 0..count as usize {
-        seeds_flat[i * 32] = i as u8;
-        seeds_flat[i * 32 + 1] = (i >> 8) as u8;
-        seeds_flat[i * 32 + 4] = 0xDE;
-        seeds_flat[i * 32 + 5] = 0xAD;
-        seeds_flat[i * 32 + 31] = 0x42;
-    }
 
-    let seeds_buf = device.new_buffer_with_data(
-        seeds_flat.as_ptr() as *const c_void,
-        seeds_flat.len() as u64,
-        MTLResourceOptions::StorageModeShared,
-    );
     let pubkeys_buf =
         device.new_buffer((count as u64) * 32, MTLResourceOptions::StorageModeShared);
     let privkeys_buf =
@@ -241,11 +246,20 @@ pub fn verify_gpu_keygen() -> Result<(), MetalError> {
     let cmd_buf = queue.new_command_buffer();
     let encoder = cmd_buf.new_compute_command_encoder();
     encoder.set_compute_pipeline_state(&pipeline);
-    encoder.set_buffer(0, Some(&seeds_buf), 0);
-    encoder.set_buffer(1, Some(&pubkeys_buf), 0);
-    encoder.set_buffer(2, Some(&privkeys_buf), 0);
     encoder.set_bytes(
-        3,
+        0,
+        std::mem::size_of::<u64>() as u64,
+        &key0 as *const u64 as *const c_void,
+    );
+    encoder.set_bytes(
+        1,
+        std::mem::size_of::<u64>() as u64,
+        &key1 as *const u64 as *const c_void,
+    );
+    encoder.set_buffer(2, Some(&pubkeys_buf), 0);
+    encoder.set_buffer(3, Some(&privkeys_buf), 0);
+    encoder.set_bytes(
+        4,
         std::mem::size_of::<u32>() as u64,
         &count as *const u32 as *const c_void,
     );
@@ -269,9 +283,9 @@ pub fn verify_gpu_keygen() -> Result<(), MetalError> {
     let mut pass = 0;
     let mut fail = 0;
     for i in 0..count as usize {
-        let mut seed = [0u8; 32];
-        seed.copy_from_slice(&seeds_flat[i * 32..(i + 1) * 32]);
-        let cpu_kp = generate_keypair(&seed);
+        let scalar_src = philox_block32(key0, key1, i as u64, 0);
+        let prefix = philox_block32(key0, key1, i as u64, 1);
+        let cpu_kp = generate_keypair_from_random_bytes(&scalar_src, &prefix);
 
         let gpu_pub = &gpu_pubkeys[i * 32..(i + 1) * 32];
         let gpu_priv = &gpu_privkeys[i * 64..(i + 1) * 64];
@@ -283,7 +297,7 @@ pub fn verify_gpu_keygen() -> Result<(), MetalError> {
             pass += 1;
         } else {
             fail += 1;
-            eprintln!("MISMATCH seed #{}", i);
+            eprintln!("MISMATCH idx #{}", i);
             eprintln!("  CPU pubkey:  {}", hex::encode_upper(&cpu_kp.public_key));
             eprintln!("  GPU pubkey:  {}", hex::encode_upper(gpu_pub));
             eprintln!("  CPU privkey: {}", hex::encode_upper(&cpu_kp.private_key));

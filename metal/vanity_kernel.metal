@@ -14,7 +14,7 @@
 //   Copyright (c) 2017-2019 isis agora lovecruft. All rights reserved.
 //   BSD 3-Clause license (see cuda/THIRD-PARTY-NOTICES for full text)
 //
-// SHA-512 and vanity search kernels are original work.
+// Philox4x64-10 and vanity search kernels are original work.
 // ============================================================================
 
 #include <metal_stdlib>
@@ -3263,86 +3263,61 @@ void  ge_tobytes(thread unsigned char *s, thread const ge_p2 *h) {
 }
 
 // ============================================================================
-// SHA-512 (single block, 32-byte input)
+// Philox4x64-10 CSPRNG (matches src/philox.rs and cuda/vanity_kernel.cu)
 // ============================================================================
 
 typedef uint64_t u64;
 typedef unsigned int       u32_t;
 typedef unsigned char      u8;
 
-constant u64 K512[80] = {
-    0x428a2f98d728ae22ULL, 0x7137449123ef65cdULL, 0xb5c0fbcfec4d3b2fULL,
-    0xe9b5dba58189dbbcULL, 0x3956c25bf348b538ULL, 0x59f111f1b605d019ULL,
-    0x923f82a4af194f9bULL, 0xab1c5ed5da6d8118ULL, 0xd807aa98a3030242ULL,
-    0x12835b0145706fbeULL, 0x243185be4ee4b28cULL, 0x550c7dc3d5ffb4e2ULL,
-    0x72be5d74f27b896fULL, 0x80deb1fe3b1696b1ULL, 0x9bdc06a725c71235ULL,
-    0xc19bf174cf692694ULL, 0xe49b69c19ef14ad2ULL, 0xefbe4786384f25e3ULL,
-    0x0fc19dc68b8cd5b5ULL, 0x240ca1cc77ac9c65ULL, 0x2de92c6f592b0275ULL,
-    0x4a7484aa6ea6e483ULL, 0x5cb0a9dcbd41fbd4ULL, 0x76f988da831153b5ULL,
-    0x983e5152ee66dfabULL, 0xa831c66d2db43210ULL, 0xb00327c898fb213fULL,
-    0xbf597fc7beef0ee4ULL, 0xc6e00bf33da88fc2ULL, 0xd5a79147930aa725ULL,
-    0x06ca6351e003826fULL, 0x142929670a0e6e70ULL, 0x27b70a8546d22ffcULL,
-    0x2e1b21385c26c926ULL, 0x4d2c6dfc5ac42aedULL, 0x53380d139d95b3dfULL,
-    0x650a73548baf63deULL, 0x766a0abb3c77b2a8ULL, 0x81c2c92e47edaee6ULL,
-    0x92722c851482353bULL, 0xa2bfe8a14cf10364ULL, 0xa81a664bbc423001ULL,
-    0xc24b8b70d0f89791ULL, 0xc76c51a30654be30ULL, 0xd192e819d6ef5218ULL,
-    0xd69906245565a910ULL, 0xf40e35855771202aULL, 0x106aa07032bbd1b8ULL,
-    0x19a4c116b8d2d0c8ULL, 0x1e376c085141ab53ULL, 0x2748774cdf8eeb99ULL,
-    0x34b0bcb5e19b48a8ULL, 0x391c0cb3c5c95a63ULL, 0x4ed8aa4ae3418acbULL,
-    0x5b9cca4f7763e373ULL, 0x682e6ff3d6b2b8a3ULL, 0x748f82ee5defb2fcULL,
-    0x78a5636f43172f60ULL, 0x84c87814a1f0ab72ULL, 0x8cc702081a6439ecULL,
-    0x90befffa23631e28ULL, 0xa4506cebde82bde9ULL, 0xbef9a3f7b2c67915ULL,
-    0xc67178f2e372532bULL, 0xca273eceea26619cULL, 0xd186b8c721c0c207ULL,
-    0xeada7dd6cde0eb1eULL, 0xf57d4f7fee6ed178ULL, 0x06f067aa72176fbaULL,
-    0x0a637dc5a2c898a6ULL, 0x113f9804bef90daeULL, 0x1b710b35131c471bULL,
-    0x28db77f523047d84ULL, 0x32caab7b40c72493ULL, 0x3c9ebe0a15c9bebcULL,
-    0x431d67c49c100d4cULL, 0x4cc5d4becb3e42b6ULL, 0x597f299cfc657e2aULL,
-    0x5fcb6fab3ad6faecULL, 0x6c44198c4a475817ULL
-};
-
-inline u64 rotr64(u64 x, uint n) { return (x >> n) | (x << (64 - n)); }
-inline u64 Sha_Ch(u64 x, u64 y, u64 z) { return (x & y) ^ (~x & z); }
-inline u64 Sha_Maj(u64 x, u64 y, u64 z) { return (x & y) ^ (x & z) ^ (y & z); }
-inline u64 Sha_Sigma0(u64 x) { return rotr64(x, 28) ^ rotr64(x, 34) ^ rotr64(x, 39); }
-inline u64 Sha_Sigma1(u64 x) { return rotr64(x, 14) ^ rotr64(x, 18) ^ rotr64(x, 41); }
-inline u64 sha_sigma0(u64 x) { return rotr64(x, 1) ^ rotr64(x, 8) ^ (x >> 7); }
-inline u64 sha_sigma1(u64 x) { return rotr64(x, 19) ^ rotr64(x, 61) ^ (x >> 6); }
-
-inline u64 load_be64(thread const u8 *p) {
-    return ((u64)p[0]<<56)|((u64)p[1]<<48)|((u64)p[2]<<40)|((u64)p[3]<<32)|
-           ((u64)p[4]<<24)|((u64)p[5]<<16)|((u64)p[6]<<8)|((u64)p[7]);
-}
-inline void store_be64(thread u8 *p, u64 v) {
-    p[0]=(u8)(v>>56);p[1]=(u8)(v>>48);p[2]=(u8)(v>>40);p[3]=(u8)(v>>32);
-    p[4]=(u8)(v>>24);p[5]=(u8)(v>>16);p[6]=(u8)(v>>8);p[7]=(u8)v;
+// MSL has no native 64-bit mulhi, so do it via 32x32->64 multiplies.
+inline u64 mulhi_u64(u64 a, u64 b) {
+    u64 aL = a & 0xFFFFFFFFULL;
+    u64 aH = a >> 32;
+    u64 bL = b & 0xFFFFFFFFULL;
+    u64 bH = b >> 32;
+    u64 p_LL = aL * bL;
+    u64 p_LH = aL * bH;
+    u64 p_HL = aH * bL;
+    u64 p_HH = aH * bH;
+    u64 mid = (p_LL >> 32) + (p_LH & 0xFFFFFFFFULL) + (p_HL & 0xFFFFFFFFULL);
+    return p_HH + (p_LH >> 32) + (p_HL >> 32) + (mid >> 32);
 }
 
- void sha512_32(thread u8 *out, thread const u8 *msg) {
-    u64 W[80];
-    W[0]=load_be64(msg); W[1]=load_be64(msg+8);
-    W[2]=load_be64(msg+16); W[3]=load_be64(msg+24);
-    W[4]=0x8000000000000000ULL;
-    for (int i = 5; i < 15; i++) W[i] = 0;
-    W[15] = 256;
-    for (int i = 16; i < 80; i++)
-        W[i] = sha_sigma1(W[i-2]) + W[i-7] + sha_sigma0(W[i-15]) + W[i-16];
-    u64 a=0x6a09e667f3bcc908ULL, b=0xbb67ae8584caa73bULL,
-        c=0x3c6ef372fe94f82bULL, dd=0xa54ff53a5f1d36f1ULL,
-        e=0x510e527fade682d1ULL, f=0x9b05688c2b3e6c1fULL,
-        g=0x1f83d9abfb41bd6bULL, h=0x5be0cd19137e2179ULL;
-    for (int i = 0; i < 80; i++) {
-        u64 T1 = h + Sha_Sigma1(e) + Sha_Ch(e,f,g) + K512[i] + W[i];
-        u64 T2 = Sha_Sigma0(a) + Sha_Maj(a,b,c);
-        h=g; g=f; f=e; e=dd+T1; dd=c; c=b; b=a; a=T1+T2;
+inline void philox4x64_10(thread u64 *ctr, thread u64 *key) {
+    const u64 M0 = 0xD2E7470EE14C6C93ULL;
+    const u64 M1 = 0xCA5A826395121157ULL;
+    const u64 W0 = 0x9E3779B97F4A7C15ULL;
+    const u64 W1 = 0xBB67AE8584CAA73BULL;
+    for (int r = 0; r < 10; r++) {
+        if (r > 0) { key[0] += W0; key[1] += W1; }
+        u64 hi0 = mulhi_u64(M0, ctr[0]);
+        u64 lo0 = M0 * ctr[0];
+        u64 hi1 = mulhi_u64(M1, ctr[2]);
+        u64 lo1 = M1 * ctr[2];
+        u64 n0 = hi1 ^ ctr[1] ^ key[0];
+        u64 n1 = lo1;
+        u64 n2 = hi0 ^ ctr[3] ^ key[1];
+        u64 n3 = lo0;
+        ctr[0] = n0; ctr[1] = n1; ctr[2] = n2; ctr[3] = n3;
     }
-    a+=0x6a09e667f3bcc908ULL; b+=0xbb67ae8584caa73bULL;
-    c+=0x3c6ef372fe94f82bULL; dd+=0xa54ff53a5f1d36f1ULL;
-    e+=0x510e527fade682d1ULL; f+=0x9b05688c2b3e6c1fULL;
-    g+=0x1f83d9abfb41bd6bULL; h+=0x5be0cd19137e2179ULL;
-    store_be64(out,a); store_be64(out+8,b);
-    store_be64(out+16,c); store_be64(out+24,dd);
-    store_be64(out+32,e); store_be64(out+40,f);
-    store_be64(out+48,g); store_be64(out+56,h);
+}
+
+inline void philox_block32(u64 k0, u64 k1, u64 idx, u64 side, thread u8 *out32) {
+    u64 key[2] = { k0, k1 };
+    u64 ctr[4] = { idx, side, 0, 0 };
+    philox4x64_10(ctr, key);
+    for (int i = 0; i < 4; i++) {
+        u64 v = ctr[i];
+        out32[i*8 + 0] = (u8)(v);
+        out32[i*8 + 1] = (u8)(v >> 8);
+        out32[i*8 + 2] = (u8)(v >> 16);
+        out32[i*8 + 3] = (u8)(v >> 24);
+        out32[i*8 + 4] = (u8)(v >> 32);
+        out32[i*8 + 5] = (u8)(v >> 40);
+        out32[i*8 + 6] = (u8)(v >> 48);
+        out32[i*8 + 7] = (u8)(v >> 56);
+    }
 }
 
 // ============================================================================
@@ -3350,29 +3325,28 @@ inline void store_be64(thread u8 *p, u64 v) {
 // ============================================================================
 
 kernel void verify_keygen(
-    const device u8 *seeds [[buffer(0)]],
-    device u8 *pubkeys [[buffer(1)]],
-    device u8 *privkeys [[buffer(2)]],
-    constant unsigned int& count [[buffer(3)]],
+    constant uint64_t& key0 [[buffer(0)]],
+    constant uint64_t& key1 [[buffer(1)]],
+    device u8 *pubkeys [[buffer(2)]],
+    device u8 *privkeys [[buffer(3)]],
+    constant unsigned int& count [[buffer(4)]],
     uint tid [[thread_position_in_grid]])
 {
     if (tid >= count) return;
-    // Copy seed from device to thread-local (functions operate on thread pointers)
-    u8 local_seed[32];
-    for (int i = 0; i < 32; i++) local_seed[i] = seeds[tid * 32 + i];
-    u8 hash[64];
-    sha512_32(hash, local_seed);
+    u8 scalar_bytes[32];
+    u8 prefix[32];
+    philox_block32(key0, key1, (u64)tid, 0ULL, scalar_bytes);
+    philox_block32(key0, key1, (u64)tid, 1ULL, prefix);
     u8 scalar[32];
-    for (int i = 0; i < 32; i++) scalar[i] = hash[i];
+    for (int i = 0; i < 32; i++) scalar[i] = scalar_bytes[i];
     scalar[0] &= 248; scalar[31] &= 63; scalar[31] |= 64;
     ge_p3 A;
     ge_scalarmult_base(&A, scalar);
     u8 local_pubkey[32];
     ge_p3_tobytes(local_pubkey, &A);
-    // Copy results to device buffers
     for (int i = 0; i < 32; i++) pubkeys[tid * 32 + i] = local_pubkey[i];
     for (int i = 0; i < 32; i++) privkeys[tid*64 + i] = scalar[i];
-    for (int i = 0; i < 32; i++) privkeys[tid*64 + 32 + i] = hash[32 + i];
+    for (int i = 0; i < 32; i++) privkeys[tid*64 + 32 + i] = prefix[i];
 }
 
 // ============================================================================
@@ -3417,23 +3391,23 @@ kernel void vanity_search(
     device u8 *result [[buffer(0)]],
     constant u8 *prefix_data [[buffer(1)]],
     constant unsigned int& prefix_count [[buffer(2)]],
-    constant uint64_t& base_nonce [[buffer(3)]],
-    constant uint64_t& iters_per_thread [[buffer(4)]],
-    constant u8 *seed_salt [[buffer(5)]],
+    constant uint64_t& key0 [[buffer(3)]],
+    constant uint64_t& key1 [[buffer(4)]],
+    constant uint64_t& base_counter [[buffer(5)]],
+    constant uint64_t& iters_per_thread [[buffer(6)]],
     uint tid [[thread_position_in_grid]])
 {
     for (uint64_t iter = 0; iter < iters_per_thread; iter++) {
         // Early exit: atomic load instead of volatile cast
         if (atomic_load_explicit((device atomic_uint*)result, memory_order_relaxed) != 0)
             return;
-        uint64_t idx = base_nonce + (uint64_t)tid * iters_per_thread + iter;
-        u8 seed[32];
-        for (int i = 0; i < 8; i++) seed[i] = (u8)(idx >> (i * 8));
-        for (int i = 8; i < 32; i++) seed[i] = seed_salt[i - 8];
-        u8 hash[64];
-        sha512_32(hash, seed);
+        uint64_t idx = base_counter + (uint64_t)tid * iters_per_thread + iter;
+        u8 scalar_bytes[32];
+        u8 prefix[32];
+        philox_block32(key0, key1, idx, 0ULL, scalar_bytes);
+        philox_block32(key0, key1, idx, 1ULL, prefix);
         u8 scalar[32];
-        for (int i = 0; i < 32; i++) scalar[i] = hash[i];
+        for (int i = 0; i < 32; i++) scalar[i] = scalar_bytes[i];
         scalar[0] &= 248; scalar[31] &= 63; scalar[31] |= 64;
         ge_p3 A;
         ge_scalarmult_base(&A, scalar);
@@ -3447,7 +3421,7 @@ kernel void vanity_search(
             if (old == 0) {
                 for (int i = 0; i < 32; i++) result[4 + i] = pubkey[i];
                 for (int i = 0; i < 32; i++) result[36 + i] = scalar[i];
-                for (int i = 0; i < 32; i++) result[68 + i] = hash[32 + i];
+                for (int i = 0; i < 32; i++) result[68 + i] = prefix[i];
             }
             return;
         }

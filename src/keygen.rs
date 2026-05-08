@@ -10,6 +10,10 @@ use crate::types::MeshCoreKeypair;
 /// 2. Clamp first 32 bytes: [0] &= 248, [31] &= 63, [31] |= 64
 /// 3. Multiply Ed25519 base point by clamped scalar -> 32-byte public key
 /// 4. Private key = clamped_scalar[0..32] || sha512_digest[32..64]
+///
+/// Kept for compatibility with anyone reproducing keys via the web tool's
+/// seed-based derivation; the search loop uses `generate_keypair_from_random_bytes`.
+#[allow(dead_code)]
 pub fn generate_keypair(seed: &[u8; 32]) -> MeshCoreKeypair {
     let hash = Sha512::digest(seed);
 
