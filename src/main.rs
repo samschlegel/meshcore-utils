@@ -63,7 +63,7 @@ struct Cli {
 fn validate_prefix(prefix: &str) -> Result<String, String> {
     let upper = prefix.to_ascii_uppercase();
 
-    if upper.is_empty() || upper.len() > 8 {
+    if upper.is_empty() || upper.len() > 12 {
         return Err(format!(
             "prefix must be 1-8 hex characters, got {} characters",
             upper.len()
