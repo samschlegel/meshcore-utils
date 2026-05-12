@@ -338,6 +338,12 @@ impl crate::search::GpuSearcher for CudaSearcher {
         })
     }
 
+    fn count_batch(
+        &mut self,
+    ) -> Result<(u64, u32), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(CudaSearcher::count_batch(self)?)
+    }
+
     fn device_name(&self) -> &str {
         &self.device_name
     }

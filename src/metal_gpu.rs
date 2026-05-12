@@ -289,6 +289,12 @@ impl crate::search::GpuSearcher for MetalSearcher {
         Ok(MetalSearcher::search_batch(self, base_nonce)?)
     }
 
+    fn count_batch(
+        &mut self,
+    ) -> Result<(u64, u32), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(MetalSearcher::count_batch(self)?)
+    }
+
     fn device_name(&self) -> &str {
         &self.device_name
     }

@@ -49,6 +49,15 @@ pub trait GpuSearcher: Send {
         base_nonce: u64,
     ) -> Result<GpuBatchResult, Box<dyn std::error::Error + Send + Sync>>;
 
+    /// Run one batch in counting mode: returns (keys_checked, matches_found)
+    /// without extracting any keypair. Used by the bench harness so a single
+    /// batch can validate observed-vs-expected match counts (Poisson check)
+    /// without short-circuiting on first match.
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+    fn count_batch(
+        &mut self,
+    ) -> Result<(u64, u32), Box<dyn std::error::Error + Send + Sync>>;
+
     fn device_name(&self) -> &str;
 }
 
