@@ -61,6 +61,25 @@ pub trait GpuSearcher: Send {
     fn device_name(&self) -> &str;
 }
 
+/// Default CPU worker count for hybrid mode.
+///
+/// Reserves one SMT pair (or one core on non-SMT hardware) per GPU so the
+/// GPU dispatch thread's host work — kernel launch, result copy — isn't
+/// preempted by CPU workers. Without this, hybrid mode is slower than
+/// pure-GPU because the dispatch thread loses cycles to oversubscription.
+///
+/// SMT-ness is detected from the logical:physical core ratio; on hybrid
+/// CPUs (Intel P+E) `logical > physical` still implies SMT exists somewhere
+/// and reserving 2 logical cores lands us on a P-core's full SMT pair.
+pub fn default_hybrid_cpu_threads(num_gpus: usize) -> usize {
+    let logical = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let physical = sysinfo::System::new().physical_core_count().unwrap_or(logical);
+    let smt_factor = if physical > 0 && logical > physical { 2 } else { 1 };
+    logical.saturating_sub(smt_factor * num_gpus).max(1)
+}
+
 /// Parsed prefix for fast nibble-level matching.
 /// Avoids hex-encoding every public key in the hot loop.
 pub struct PrefixMatcher {

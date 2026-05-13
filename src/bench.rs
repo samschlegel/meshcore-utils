@@ -18,6 +18,8 @@ use serde::Serialize;
 
 #[cfg(feature = "gpu")]
 use crate::search::GpuSearcher;
+#[cfg(feature = "gpu")]
+use crate::search::default_hybrid_cpu_threads;
 use crate::search::{advance_scalar, clamp_scalar, PrefixMatcher};
 
 const SCHEMA_VERSION: u32 = 1;
@@ -64,6 +66,8 @@ pub struct BenchArgs {
 pub enum BenchMode {
     Cpu1,
     CpuN,
+    /// CPU at physical-core count (no SMT) — baseline for SMT scaling.
+    CpuP,
     Gpu,
     Hybrid,
     All,
@@ -301,6 +305,7 @@ fn expand_modes(mode: BenchMode) -> Vec<BenchMode> {
     match mode {
         BenchMode::All => vec![
             BenchMode::Cpu1,
+            BenchMode::CpuP,
             BenchMode::CpuN,
             BenchMode::Gpu,
             BenchMode::Hybrid,
@@ -313,6 +318,7 @@ fn mode_str(mode: BenchMode) -> &'static str {
     match mode {
         BenchMode::Cpu1 => "cpu1",
         BenchMode::CpuN => "cpuN",
+        BenchMode::CpuP => "cpuP",
         BenchMode::Gpu => "gpu",
         BenchMode::Hybrid => "hybrid",
         BenchMode::All => "all",
@@ -385,6 +391,7 @@ pub fn run(args: BenchArgs) -> Result<(), Box<dyn Error>> {
             .collect(),
     );
 
+    let threads_explicit = args.threads.is_some();
     let threads = args.threads.unwrap_or_else(|| {
         std::thread::available_parallelism()
             .map(|n| n.get())
@@ -418,6 +425,7 @@ pub fn run(args: BenchArgs) -> Result<(), Box<dyn Error>> {
 
     let ctx = BenchContext {
         threads,
+        threads_explicit,
         prefixes: &prefixes,
         matchers,
         duration,
@@ -440,6 +448,10 @@ pub fn run(args: BenchArgs) -> Result<(), Box<dyn Error>> {
 /// Per-run inputs shared across every mode in a single `bench` invocation.
 struct BenchContext<'a> {
     threads: usize,
+    /// True if `--threads` was passed on the CLI. Disables hybrid's
+    /// SMT-aware default thread count so the user's value is respected.
+    #[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+    threads_explicit: bool,
     prefixes: &'a [String],
     matchers: Arc<Vec<PrefixMatcher>>,
     duration: Duration,
@@ -484,6 +496,18 @@ fn run_one_mode(ctx: &BenchContext, mode: BenchMode) -> Result<(), Box<dyn Error
             ctx.threads,
             Vec::<String>::new(),
         ),
+        BenchMode::CpuP => {
+            let phys = ctx
+                .machine_template
+                .cpu_physical_cores
+                .unwrap_or((ctx.threads / 2).max(1))
+                .max(1);
+            (
+                BenchHandle::start_cpu(Arc::clone(&ctx.matchers), phys),
+                phys,
+                Vec::<String>::new(),
+            )
+        }
         BenchMode::Gpu | BenchMode::Hybrid => {
             #[cfg(feature = "gpu")]
             {
@@ -497,9 +521,18 @@ fn run_one_mode(ctx: &BenchContext, mode: BenchMode) -> Result<(), Box<dyn Error
                 if mode == BenchMode::Gpu {
                     (BenchHandle::start_gpu(gpus), 0, names)
                 } else {
+                    let hybrid_threads = if ctx.threads_explicit {
+                        ctx.threads
+                    } else {
+                        default_hybrid_cpu_threads(gpus.len())
+                    };
                     (
-                        BenchHandle::start_hybrid(Arc::clone(&ctx.matchers), ctx.threads, gpus),
-                        ctx.threads,
+                        BenchHandle::start_hybrid(
+                            Arc::clone(&ctx.matchers),
+                            hybrid_threads,
+                            gpus,
+                        ),
+                        hybrid_threads,
                         names,
                     )
                 }

@@ -408,12 +408,6 @@ fn main() {
         }
     }
 
-    let num_threads = cli.threads.unwrap_or_else(|| {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
-    });
-
     // Expected attempts: use shortest prefix length, divided by count of same-length prefixes
     let min_len = prefixes.iter().map(|p| p.len()).min().unwrap();
     let same_len_count = prefixes.iter().filter(|p| p.len() == min_len).count() as u64;
@@ -459,6 +453,18 @@ fn main() {
     } else {
         try_init_gpu(&prefixes)
     };
+
+    // Hybrid mode reserves cores for the GPU dispatch thread; pure-CPU uses
+    // all logical cores. Explicit -t overrides either default.
+    let num_threads = cli.threads.unwrap_or_else(|| {
+        if !gpu_searchers.is_empty() && !gpu_only {
+            search::default_hybrid_cpu_threads(gpu_searchers.len())
+        } else {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        }
+    });
 
     let (handle, mode_label) = if gpu_only {
         if gpu_searchers.is_empty() {
