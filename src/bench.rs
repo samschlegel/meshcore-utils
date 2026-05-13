@@ -22,7 +22,7 @@ use crate::search::GpuSearcher;
 use crate::search::default_hybrid_cpu_threads;
 use crate::search::{advance_scalar, clamp_scalar, PrefixMatcher};
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 /// Number of points compressed under one batched inversion. Mirrors
 /// `CHAIN_BATCH` in src/search.rs so the bench worker measures the same hot
@@ -58,8 +58,10 @@ pub struct BenchArgs {
     pub out: Option<PathBuf>,
 
     /// Human-friendly machine label embedded in each record (e.g. "M4 Max MBP").
+    /// Required so records are identifiable across machines without leaking
+    /// the host's actual hostname.
     #[arg(long)]
-    pub machine_label: Option<String>,
+    pub machine_label: String,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,8 +94,7 @@ struct BenchGit {
 
 #[derive(Serialize, Clone)]
 struct BenchMachine {
-    label: Option<String>,
-    hostname: String,
+    label: String,
     os: String,
     cpu_model: String,
     cpu_physical_cores: Option<usize>,
@@ -348,9 +349,8 @@ fn gather_git() -> BenchGit {
     }
 }
 
-fn gather_machine(label: Option<String>) -> BenchMachine {
+fn gather_machine(label: String) -> BenchMachine {
     let sys = sysinfo::System::new_all();
-    let hostname = sysinfo::System::host_name().unwrap_or_else(|| "unknown".to_string());
     let os = sysinfo::System::long_os_version()
         .or_else(sysinfo::System::name)
         .unwrap_or_else(|| "unknown".to_string());
@@ -365,7 +365,6 @@ fn gather_machine(label: Option<String>) -> BenchMachine {
 
     BenchMachine {
         label,
-        hostname,
         os,
         cpu_model,
         cpu_physical_cores,
@@ -404,10 +403,7 @@ pub fn run(args: BenchArgs) -> Result<(), Box<dyn Error>> {
 
     eprintln!(
         "Machine: {} ({}, {} logical / {:?} physical cores, {} GB RAM)",
-        machine_template
-            .label
-            .as_deref()
-            .unwrap_or(machine_template.hostname.as_str()),
+        machine_template.label,
         machine_template.cpu_model,
         machine_template.cpu_logical_cores,
         machine_template.cpu_physical_cores,
